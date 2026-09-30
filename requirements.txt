@@ -1,0 +1,6 @@
+google-genai
+python-dotenv
+datasets
+pytest
+pytest-cov
+hypothesis
