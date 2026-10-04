@@ -85,6 +85,17 @@ QA_ADV_SYSTEM = (
     "properties. Reply with one ```python block only."
 )
 
+JUDGE_SYSTEM = (
+    "You are the test executor and judge. The generated tests have already been run, "
+    "and you get the task, the final code and the execution results. Write the verdict "
+    "report. The first line is exactly 'VERDICT: PASS' or 'VERDICT: FAIL'. It's PASS "
+    "only if every property that counts holds (unresolved properties don't count). Then "
+    "write 3 to 6 short lines: which properties hold, which failed and on what input with "
+    "expected vs actual, whether each failure came from the code or from a wrong test, and "
+    "for code failures, what the code does wrong. Use only the results given and don't "
+    "invent any. Plain text, no markdown."
+)
+
 # dropped into the run folder so pytest records one result per test case
 CONFTEST = '''import json, os, re
 import pytest
@@ -364,6 +375,23 @@ def judge(run_dir, name):
         "bad_tests": rc in (2, 4),  # collection/usage error, tests themselves are broken
         "output": out,
     }
+
+
+def judge_verdict(task, code, facts, verdict, log):
+    """Judge agent: turns the execution results into a verdict report.
+
+    The PASS/FAIL itself comes from the test results, so if the LLM says something
+    different the results win and the mismatch is noted.
+    """
+    user = f"Task:\n{task}\n\nFinal code:\n```python\n{code}```\n\nTest execution results:\n{facts}"
+    text = call_gemini(JUDGE_SYSTEM, user, log, "judge").strip()
+    said = re.match(r"VERDICT:\s*(PASS|FAIL)", text)
+    if not said:
+        return f"VERDICT: {verdict}\n{text}"
+    if said.group(1) != verdict:
+        return (f"VERDICT: {verdict}  (the judge agent said {said.group(1)}, but the test "
+                f"results say {verdict}, so the results win)\n{text[said.end():].strip()}")
+    return text
 
 
 def describe(t):
@@ -712,6 +740,7 @@ def run_task(task_id, task, name, props, mode, out_root, reference=None):
     labels = {"code_bug": "Failures caused by the code",
               "wrong_test": "Wrong tests (failed on the reference solution too)",
               "broken_test": "Broken tests (crashed by themselves)"}
+    summary_start = len(report_lines)
     report_lines += ["Summary", f"  Verdict: {report['verdict']} after {len(attempts)} run(s)",
                      f"  Code rewritten: {code_v - 1} time(s), tests rewritten: {test_v - 1} time(s)"]
     if unresolved:
@@ -728,6 +757,14 @@ def run_task(task_id, task, name, props, mode, out_root, reference=None):
                 report_lines += [f"      expected: {f['expected']}", f"      actual:   {f['actual']}"]
             else:
                 report_lines.append(f"      error:    {f['message']}")
+
+    # the judge agent reads everything above and writes the verdict report
+    final_status = render_attempt("final run", final, props)
+    facts = "\n".join([final_status[0], *final_status[1], "", *report_lines[summary_start:]])
+    report["judge_report"] = judge_verdict(task, code, facts, report["verdict"], log)
+    print("\n  Judge agent:\n    " + report["judge_report"].replace("\n", "\n    "))
+    report_lines += ["", "Judge agent verdict", "  " + report["judge_report"].replace("\n", "\n  ")]
+
     (run_dir / "report.txt").write_text("\n".join(report_lines), encoding="utf-8")
     (run_dir / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
